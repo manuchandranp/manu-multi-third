@@ -81,10 +81,6 @@ jobs:
             echo "package_dir=$PACKAGE_DIR" >> $GITHUB_OUTPUT
           fi
 
-      #- name: Show configured npm registry (safe debug)
-        #run: |
-         # echo "NPM registry configured in ~/.npmrc (showing registry lines only):"
-          #grep -E 'registry|always-auth' ~/.npmrc || true
 
       - name: Install deps and publish package to Artifactory
         env:
