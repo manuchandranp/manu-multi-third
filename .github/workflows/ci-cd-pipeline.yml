@@ -1,0 +1,57 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '14'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Tests
+        run: |
+          echo "Running tests..."
+          npm test
+
+      - name: Build Project
+        run: |
+          echo "Building the project..."
+          mkdir -p dist
+          echo "Build content" > dist/artifact.txt
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: built-project-artifact
+          path: dist/
+
+  publish-npm:
+    needs: build-and-test
+    # CALL THE REUSABLE WORKFLOW AT JOB-LEVEL (NOT INSIDE steps:)
+    uses: ./.github/workflows/npm-publish.yml
+    with:
+      jfrog-npm-repository: manu-npm-virtual
+      jfrog-url: https://hts2.jfrog.io
+      node-version: '14'
+      # Pass a repo-relative path to the package.json you want to publish:
+      package-json-file-path: package.json
+      # Optional: download the artifact uploaded by build-and-test (true/false)
+      download-artifact: true
+      artifact-name: built-project-artifact
+      # Optional: build info metadata
+      build-name: "${{ github.repository }}"
+      build-number: "${{ github.run_id }}"
+    secrets:
+      JFROG_ACCESS_TOKEN : ${{ secrets.JFROG_ACCESS_TOKEN  }}
