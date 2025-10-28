@@ -1,0 +1,142 @@
+name: Publish NPM Package to JFrog
+
+on:
+  workflow_call:
+    inputs:
+      jfrog-npm-repository:
+        required: true
+        type: string
+      jfrog-url:
+        required: true
+        type: string
+      node-version:
+        required: true
+        type: string
+      package-json-file-path:
+        required: true
+        type: string
+      download-artifact:
+        required: false
+        type: boolean
+      artifact-name:
+        required: false
+        type: string
+      build-name:
+        required: false
+        type: string
+      build-number:
+        required: false
+        type: string
+    secrets:
+      JFROG_ACCESS_TOKEN:
+        required: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: (Optional) Download build artifact from earlier job
+        if: ${{ inputs.download-artifact == true }}
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: .
+
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs['node-version'] }}
+
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        env:  
+           JF_URL: ${{ vars.JF_URL }}
+           JFROG_ACCESS_TOKEN : ${{ secrets.JFROG_ACCESS_TOKEN }}
+             jf --version
+
+      - name: Configure JFrog CLI server
+        env:
+          JFROG_ACCESS_TOKEN : ${{ secrets.JFROG_ACCESS_TOKEN  }}
+        run: |
+          JFROG_URL="${{ inputs['jfrog-url'] }}"
+          # If JFROG_URL already contains "/artifactory", use as-is; otherwise append "/artifactory"
+          if [[ "$JFROG_URL" == *"/artifactory"* ]]; then
+            ARTIFACTORY_BASE_URL="$JFROG_URL"
+          else
+            ARTIFACTORY_BASE_URL="${JFROG_URL}/artifactory"
+          fi
+          jf config add artifactory-server --url="$JFROG_URL" --access-token="$JFROG_ACCESS_TOKEN " --interactive=false
+          echo "JFrog CLI configured for server id: artifactory-server (URL: $JFROG_URL)"
+
+      - name: Configure npm auth for JFrog (jfrog rt npm-config)
+        run: |
+          REPO="${{ inputs['jfrog-npm-repository'] }}"
+          jf npm-config --repo-deploy "$REPO" --repo-resolve "$REPO" --server-id-deploy=artifactory-server --server-id-resolve=artifactory-server
+          echo "npm configured to use Artifactory npm repo: $REPO"
+
+      - name: Prepare package location
+        id: pkg
+        run: |
+          PACKAGE_JSON_PATH="${{ inputs['package-json-file-path'] }}"
+          PACKAGE_DIR="$(dirname "$PACKAGE_JSON_PATH")"
+          if [ "$PACKAGE_DIR" = "." ]; then
+            echo "package_dir=." >> $GITHUB_OUTPUT
+          else
+            echo "package_dir=$PACKAGE_DIR" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Show configured npm registry (safe debug)
+        run: |
+          echo "NPM registry configured in ~/.npmrc (showing registry lines only):"
+          grep -E 'registry|always-auth' ~/.npmrc || true
+
+      - name: Install deps and publish package to Artifactory
+        env:
+         JFROG_ACCESS_TOKEN: ${{ secrets.JFROG_ACCESS_TOKEN }}
+        run: |
+         set -euo pipefail
+
+         JFROG_URL="${{ inputs['jfrog-url'] }}"
+         if [[ "$JFROG_URL" == *"/artifactory"* ]]; then
+         BASE_URL="$JFROG_URL"
+         else
+         BASE_URL="${JFROG_URL}/artifactory"
+         fi
+         REGISTRY_URL="$BASE_URL/api/npm/${{ inputs['jfrog-npm-repository'] }}"
+         echo "Publishing to npm registry: $REGISTRY_URL"
+
+         cd "${{ steps.pkg.outputs.package_dir }}"
+         echo "Current working directory: $(pwd)"
+         echo "package.json preview:"
+         head -n 10 package.json
+         # install deps using jf npm
+          if [ -f package-lock.json ]; then
+          jf npm ci
+           else
+           jf npm install
+          fi
+
+          # pack the npm tarball manually to confirm it's created
+          echo "Packing npm package..."
+          npm pack
+
+          echo "Generated files:"
+          ls -lh *.tgz || echo "No .tgz file found!"
+
+            # safer publish: upload the .tgz directly
+           PACKAGE_TGZ=$(ls *.tgz | head -n 1)
+          jf rt upload "$PACKAGE_TGZ" "${{ inputs['jfrog-npm-repository'] }}" \
+         --flat=false --server-id=artifactory-server --build-name=${{ inputs['build-name'] }} --build-number=${{ inputs['build-number'] }}
+
+           echo "Package uploaded: $PACKAGE_TGZ"
+
+      - name: (Optional) Record build-info with JFrog CLI
+        if: ${{ inputs['build-name'] != '' && inputs['build-number'] != '' }}
+        run: |
+          jf rt bce "${{ inputs['build-name'] }}" "${{ inputs['build-number'] }}"
+          jf rt bp "${{ inputs['build-name'] }}" "${{ inputs['build-number'] }}" --server-id=artifactory-server 
+          echo "Build info published for ${{ inputs['build-name'] }} #${{ inputs['build-number'] }}"
